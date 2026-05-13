@@ -1,0 +1,33 @@
+{
+  "name": "@stevengonsalvez/nanoclaw-discord",
+  "version": "0.1.0-v1",
+  "description": "Discord channel for NanoClaw. v1 source (fork) + v2 ChannelAdapter port TBD.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  },
+  "files": [
+    "src/",
+    "skill/",
+    "MIGRATION.md",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevengonsalvez/nanoclaw-discord.git"
+  },
+  "keywords": [
+    "nanoclaw",
+    "discord",
+    "channel"
+  ],
+  "license": "MIT"
+}
