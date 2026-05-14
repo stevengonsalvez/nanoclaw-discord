@@ -1,95 +1,53 @@
-# v1 → v2 ChannelAdapter port
+# v1 → v2 ChannelAdapter port — DONE
 
-The v1 `discord.ts` here uses fork's `Channel` interface. v2's `ChannelAdapter` is a different shape. This file is the checklist for porting.
+This document is the historical port checklist. The port is complete on branch `port/v2-channeladapter` and lives in `src/channels/discord.ts`. The summary below records what landed and how it differs from the v1 source preserved on the `v1-source-extract` branch.
 
-## What changes
+## What landed
 
-### v1 (fork) channel surface
+| Surface | v1 (fork) | v2 port |
+|---|---|---|
+| Contract | `Channel` (`connect / sendMessage / disconnect / isConnected / ownsJid / setTyping(jid, on)`) | `ChannelAdapter` (`setup / teardown / deliver / setTyping / subscribe / openDM / isConnected`) |
+| Inbound delivery | `opts.onMessage(jid, msg)` + `opts.onChatMetadata(jid, ts, name, channelType, isGroup)` | `setup.onInbound(platformId, threadId, InboundMessage)` + `setup.onMetadata(platformId, name?, isGroup?)` |
+| Trigger matching | Adapter-resident (`buildTriggerPattern` + mention/reply text rewrites) | Router-resident — adapter sets platform-confirmed `isMention: boolean` and forwards every non-bot message. v2 router's `engage_mode='mention'` / `'mention-sticky'` wirings consume `isMention` directly. |
+| platform_id format | `dc:<channelId>` or per-bot `dc-<name>:<channelId>` | `discord:<guildId>:<channelId>` (4-part `discord:<guildId>:<channelId>:<threadId>` accepted for legacy compatibility on delivery). DMs use `discord:@me:<dmChannelId>`. |
+| Thread support | Not modelled — channel-level only | First-class — `threadId` flows alongside `platformId` and `deliver()` routes through the thread. `supportsThreads: true`. |
+| Multi-bot | `DISCORD_BOTS=name:token:trigger;…` env (single colon-delimited string) | `DISCORD_BOTS_LIST=name1,name2,…` + per-bot `DISCORD_TOKEN_<NAME>`, `DISCORD_APPLICATION_ID_<NAME>` (optional), `DISCORD_PUBLIC_KEY_<NAME>` (optional). Each bot self-registers under `channelType=discord-<name>`. Single-bot legacy fallback (`DISCORD_BOT_TOKEN`) registers under `channelType=discord`. |
+| Multi-bot key insight | Each bot is its own `DiscordChannel` instance with a distinct `jidPrefix` to namespace JIDs | Each bot is its own `ChannelAdapter` instance with a distinct `channelType`. v2's `messaging_groups` UNIQUE(`channel_type`, `platform_id`) lets both bots share the same Discord channel (same `platform_id`) under different `channel_type`s — no JID-prefix games needed. |
+| Trigger fix (`[Reply to X]` @-mention) | Cherry-picked into fork main as commit `87f6cef` | Moot — v2 router uses `isMention` not text regex. The reply prefix is still emitted in content (`[Reply to <Sender>] ...`) for prompt readability, but routing decisions don't depend on its position. |
+| Bot token transport | OneCLI vault → process env → adapter | Same. The adapter reads `DISCORD_TOKEN_*` first from `process.env`, then from `.env` via `readEnvFile`. OneCLI injects at process spawn time. |
 
-```ts
-// fork: src/channels/discord.ts
-import { registerChannel, ChannelOpts } from './registry.js';
-import { ASSISTANT_NAME, buildTriggerPattern } from '../config.js';
-import { Channel, OnChatMetadata, OnInboundMessage, RegisteredGroup } from '../types.js';
+## Differences from MIGRATION.md draft
 
-interface DiscordChannelOpts {
-  onMessage: OnInboundMessage;
-  onChatMetadata: OnChatMetadata;
-  registeredGroups: () => Record<string, RegisteredGroup>;
-}
+The original checklist had a few items the implementation diverged from. Recording them so future readers know the divergences are intentional:
 
-registerChannel({ name: 'discord', ... });
+1. **`supportsThreads` is `true` (not optional).** Discord ALWAYS supports threads; setting `true` unconditionally avoids router fallback paths that would strip the `threadId`.
+2. **`openDM` is implemented.** The original checklist marked it as TBD. v2 wants it for cold DM initiation; the port wires through `client.users.fetch(id).createDM()` and encodes the result as `discord:@me:<dmId>`.
+3. **`subscribe` is a no-op recorder.** Discord's Gateway delivers every `MESSAGE_CREATE` in channels the bot can see — there's no platform-side action to "subscribe" to a thread. The router holds its own subscribed-threads ledger; the adapter records subscribes in an in-memory `Set` purely for instrumentation visibility.
+4. **No `start/stop` — `setup/teardown`.** The v2 contract in `upstream/main:src/channels/adapter.ts` uses `setup` and `teardown`, not the older `start`/`stop` names that appeared in early v2 drafts.
+5. **Multi-bot env format.** Adopted `DISCORD_BOTS_LIST` + per-bot env vars (cleaner for OneCLI vault) rather than the fork's `DISCORD_BOTS=name:token:trigger;…` colon-delimited string. Legacy `DISCORD_BOT_TOKEN` fallback retained.
+6. **Trigger name removed from per-bot config.** v1's `triggerName` was used to rewrite `@${triggerName} ` into the content. v2's router doesn't care about content for engagement — it uses `isMention`. So per-bot `trigger_name` is dropped. The agent group's display name (the v2 source-of-truth for what users type as `@Andy` / `@Data` / `@Geordi`) lives in `agent_groups.name` and the router resolves it there.
+
+## Verifying the port
+
+```bash
+git checkout port/v2-channeladapter
+pnpm install
+pnpm typecheck   # tsc --noEmit must be clean
+pnpm test        # 44/44 vitest specs green
 ```
 
-The v1 channel:
-- Owns trigger-matching (`buildTriggerPattern` injected per group)
-- Receives `OnInboundMessage(jid, sender, content, ...)` callbacks
-- Tracks registered groups itself
-- Knows about `ASSISTANT_NAME`
+## Installing into nanoclaw v2
 
-### v2 (upstream) channel surface
+The `/add-discord` skill at `skill/SKILL.md` walks an operator through:
 
-```ts
-// v2: src/channels/adapter.ts
-export interface ChannelSetup {
-  onInbound(platformId: string, threadId: string | null, message: InboundMessage): void | Promise<void>;
-  onInboundEvent(event: InboundEvent): void | Promise<void>;
-  onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
-  onAction(questionId: string, selectedOption: string, userId: string): void;
-}
+1. Copy `src/channels/discord.ts` from this repo into the target nanoclaw tree at the same path.
+2. Append `import './discord.js';` to `src/channels/index.ts` if not already present.
+3. `pnpm install discord.js@^14.25.1`.
+4. Capture per-bot env vars via OneCLI vault (`onecli set DISCORD_TOKEN_DATA …`).
+5. `pnpm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw`.
 
-export interface ChannelAdapter {
-  channelType: string;
-  start(setup: ChannelSetup): Promise<void>;
-  stop(): Promise<void>;
-  deliver(platformId: string, threadId: string | null, content: string): Promise<{ messageId?: string }>;
-  setTyping?(platformId: string, threadId: string | null, on: boolean): Promise<void>;
-  subscribe?(platformId: string, threadId: string): Promise<void>;
-  supportsThreads?: boolean;
-}
-```
+Note that the **stub files** in this repo (`src/channels/adapter.ts`, `src/channels/channel-registry.ts`, `src/env.ts`, `src/log.ts`) are NOT installed into nanoclaw — they exist purely so this repo can `tsc --noEmit` and `vitest run` against the same shape upstream provides. The skill copies only `src/channels/discord.ts` (and tests if requested).
 
-The v2 channel:
-- Does NOT trigger-match (router layer handles it)
-- Returns platform message IDs from `deliver` for threading
-- Implements `setTyping` (typing indicator)
-- Implements `subscribe` (post-engagement thread tracking)
-- Distinguishes `onInbound` (chat) from `onInboundEvent` (admin transport routing)
-- Handles `onAction` (button-click responses from interactive cards)
+## v1 archive
 
-## Port checklist
-
-When porting `src/channels/discord.ts` (v1) to a v2 `ChannelAdapter`:
-
-- [ ] Strip `buildTriggerPattern` / `ASSISTANT_NAME` imports — router handles triggers in v2.
-- [ ] Replace `registerChannel({ name, ... })` with `export const discordAdapter: ChannelAdapter = { channelType: 'discord', ... }` and register via `channels/channel-registry.ts`.
-- [ ] Map Discord events to v2's `InboundEvent`:
-  - `channelType: 'discord'`
-  - `platformId: \`discord:${guildId}:${channelId}\`` (or DM equivalent)
-  - `threadId: <discord thread ID if applicable, else null>`
-  - `message.id: <Discord message snowflake>`
-  - `message.isMention: <true if bot was @mentioned via discord.js native detection>` ← important for v2's mention-sticky engagement
-  - `message.isGroup: <true for guild channels, false for DMs>`
-- [ ] Implement `deliver(platformId, threadId, content)` — parse platformId back to guild/channel, send via discord.js, return the platform message ID so v2 stores it in the `delivered` table.
-- [ ] Implement `setTyping` — use Discord's typing indicator API.
-- [ ] Implement `subscribe` — record thread subscription so subsequent messages in that thread arrive as inbound without needing @mention.
-- [ ] Multi-bot support: v2 already has provider abstraction; check whether multi-bot lives at the adapter layer (one adapter, many tokens) or as separate adapter instances (cleaner). Recommended: instance-per-bot.
-- [ ] Token handling: pull from OneCLI gateway (same as v1) — no token in the container.
-- [ ] Discord reply-to prefix bug: fork's v1 trigger regex didn't match `[Reply to X] @Data ...`. v2 router does message normalization differently — verify the v2 router handles this correctly before considering this resolved.
-- [ ] Update tests: v2 channel adapters are typically integration-tested via a fake `ChannelSetup` callback target, not the v1 in-process group registry.
-
-## Reference
-
-v2 example channels live at:
-- `src/channels/cli.ts` — minimal native adapter (Unix socket).
-- `src/channels/chat-sdk-bridge.ts` — generic Chat SDK adapter wrapper.
-
-Read these first before porting.
-
-## Timing
-
-Suggested order:
-1. Stevie creates `github.com/stevengonsalvez/nanoclaw-discord` (empty).
-2. Push this v1 source as `v0.1.0-v1` tag.
-3. Open a `v2` branch and port using the checklist above.
-4. Tag `v1.0.0-v2` when port lands and integrates with vanilla NanoClaw v2.
+The v1 source remains on the `v1-source-extract` branch for reference. Don't delete that branch.
