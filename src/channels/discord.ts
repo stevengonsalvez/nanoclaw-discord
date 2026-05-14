@@ -314,7 +314,6 @@ function resolveConversationName(message: DiscordMessage): string {
 export function createDiscordChannelAdapter(config: DiscordAdapterConfig): ChannelAdapter {
   const label = config.label ?? config.channelType;
   let client: Client | null = null;
-  let setupConfig: ChannelSetup | null = null;
   let botUserId = '';
   // Thread subscriptions — set during subscribe(), informational for
   // adapter-side instrumentation. Discord's Gateway delivers every
@@ -329,7 +328,17 @@ export function createDiscordChannelAdapter(config: DiscordAdapterConfig): Chann
     supportsThreads: true,
 
     async setup(host: ChannelSetup): Promise<void> {
-      setupConfig = host;
+      // Re-setup guard: if a caller invokes setup() twice without an
+      // intervening teardown(), the previous Discord Client (and its
+      // open Gateway WebSocket) would leak. Tear down first, then
+      // continue with a fresh client.
+      if (client) {
+        log.warn('Discord adapter setup called twice — tearing down previous client', {
+          channelType: config.channelType,
+          label,
+        });
+        await adapter.teardown();
+      }
       client = new Client({
         intents: [
           GatewayIntentBits.Guilds,
@@ -522,7 +531,6 @@ export function createDiscordChannelAdapter(config: DiscordAdapterConfig): Chann
         botUserId = '';
         log.info('Discord bot stopped', { channelType: config.channelType, label });
       }
-      setupConfig = null;
       subscribedThreads.clear();
     },
 
@@ -530,11 +538,6 @@ export function createDiscordChannelAdapter(config: DiscordAdapterConfig): Chann
       return client !== null && client.isReady();
     },
   };
-
-  // Defensive: surface the resolved setup target so introspection in tests
-  // can confirm `setup` actually wired through (otherwise teardown without
-  // setup is a no-op that looks identical to a never-called setup).
-  void setupConfig;
 
   return adapter;
 }

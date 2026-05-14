@@ -347,6 +347,21 @@ describe('createDiscordChannelAdapter — lifecycle', () => {
     await a.teardown();
     expect(a.isConnected()).toBe(false);
   });
+
+  it('setup() called twice tears down the previous client (no Gateway leak)', async () => {
+    const a = createDiscordChannelAdapter({ channelType: 'discord', botToken: 't' });
+    await a.setup(createTestSetup().setup);
+    const firstClient = clientInstances.list[0] as ReturnType<typeof lastClient>;
+    expect(firstClient.isReady()).toBe(true);
+    // Re-setup without teardown — the adapter should clean up the
+    // previous Gateway connection before opening a new one.
+    await a.setup(createTestSetup().setup);
+    expect(clientInstances.list).toHaveLength(2);
+    expect(firstClient.isReady()).toBe(false);
+    const secondClient = clientInstances.list[1] as ReturnType<typeof lastClient>;
+    expect(secondClient.isReady()).toBe(true);
+    expect(a.isConnected()).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
